@@ -89,6 +89,9 @@ class MainActivity : Activity() {
     private var showHidden = true
     private var bridgeOn = false
     private var bridgeOld = ""
+    private var bridgeAway = false
+    private val DEF_APP = "com.marc.files"
+    private val prefs by lazy { getSharedPreferences("spacemap", Context.MODE_PRIVATE) }
     private var incoming: Intent? = null
     private lateinit var pathEdit: EditText
     private lateinit var crumbs: LinearLayout
@@ -106,6 +109,7 @@ class MainActivity : Activity() {
     private lateinit var sortBtn: TextView
     private lateinit var selAllBtn: TextView
     private lateinit var hidBtn: TextView
+    private lateinit var openBtn: TextView
     private val adapter = Adapter()
     private val refreshRun = Runnable {
         scheduled = false
@@ -148,6 +152,10 @@ class MainActivity : Activity() {
         } else if (!asking) {
             askAccess()
         }
+    }
+    override fun onPause() {
+        super.onPause()
+        if (bridgeOn) bridgeAway = true
     }
     override fun onDestroy() {
         pool?.shutdownNow()
@@ -377,9 +385,31 @@ class MainActivity : Activity() {
         }
         dlg.show()
     }
+    private fun savedApp(): AppItem? {
+        val p = prefs.getString("app_pkg", null)
+        if (p != null) return AppItem(prefs.getString("app_label", p) ?: p, p, false)
+        return try {
+            packageManager.getPackageInfo(DEF_APP, 0)
+            AppItem("Files", DEF_APP, false)
+        } catch (e: Exception) {
+            null
+        }
+    }
+    private fun updateOpenBtn() {
+        val s = savedApp()
+        openBtn.text = if (s == null) "🔓 مجلد محمي" else "📂 " + s.label
+    }
+    private fun openProtected() {
+        val s = savedApp()
+        if (s == null) askSaf() else openWith(s)
+    }
     private fun launchTree() {
         try {
-            chooseApp("افتح المجلد باستخدام أي تطبيق") { app -> openWith(app) }
+            chooseApp("افتح المجلد باستخدام أي تطبيق") { app ->
+                prefs.edit().putString("app_pkg", app.pkg).putString("app_label", app.label).apply()
+                updateOpenBtn()
+                openWith(app)
+            }
         } catch (e: Exception) {
             toast("تعذر عرض التطبيقات")
         }
@@ -392,11 +422,25 @@ class MainActivity : Activity() {
                     return
                 }
             }
-            clip("path", cur.absolutePath, "ادخل المجلد المحمي في " + app.label + " وانسخ مساره ثم ارجع هنا")
+            val tgt = if (disk.saf.prot(cur)) cur else File(Environment.getExternalStorageDirectory(), "Android/data")
+            clip("path", tgt.absolutePath, "ادخل المجلد المحمي في " + app.label + " وانسخ مساره ثم ارجع هنا")
             bridgeOld = clipText()
             bridgeOn = true
+            bridgeAway = false
+            val sysUri = DocumentsContract.buildDocumentUri(AUTH, docIdOf(tgt))
+            for (sp in arrayOf("com.google.android.documentsui", "com.android.documentsui")) {
+                if (app.pkg != DEF_APP && app.pkg != sp) continue
+                try {
+                    val b = Intent("android.provider.action.BROWSE")
+                    b.setPackage(sp)
+                    b.setDataAndType(sysUri, "vnd.android.document/directory")
+                    startActivity(b)
+                    return
+                } catch (x: Exception) {
+                }
+            }
             val v = Intent(Intent.ACTION_VIEW)
-            v.setDataAndType(DocumentsContract.buildDocumentUri(AUTH, docIdOf(cur)), "vnd.android.document/directory")
+            v.setDataAndType(DocumentsContract.buildDocumentUri(AUTH, docIdOf(tgt)), "vnd.android.document/directory")
             v.setPackage(app.pkg)
             v.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             try {
@@ -435,6 +479,20 @@ class MainActivity : Activity() {
                 }
                 return disk.saf.rootOf(id).path
             }
+            if (u.scheme == "content") {
+                try {
+                    contentResolver.query(u, arrayOf("_data"), null, null, null)?.use {
+                        if (it.moveToFirst()) {
+                            val p = it.getString(0)
+                            if (!p.isNullOrBlank() && p.startsWith("/")) return p
+                        }
+                    }
+                } catch (e: Exception) {
+                }
+                val dec = Uri.decode(u.toString())
+                val m = Regex("(/storage/[^?#\\n]+|/sdcard/[^?#\\n]*)").find(dec)
+                if (m != null) return m.value
+            }
         } catch (e: Exception) {
         }
         return null
@@ -442,8 +500,12 @@ class MainActivity : Activity() {
     private fun handleIncoming(i: Intent) {
         val t = i.getStringExtra(Intent.EXTRA_TEXT)
         val d = i.data
+        val s = i.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
         if (i.action == Intent.ACTION_SEND && !t.isNullOrBlank()) {
             goPath(t)
+        } else if (i.action == Intent.ACTION_SEND && s != null) {
+            val p = uriToPath(s)
+            if (p != null) goPath(p) else toast("تعذر قراءة المسار من التطبيق")
         } else if (i.action == Intent.ACTION_VIEW && d != null) {
             val p = uriToPath(d)
             if (p != null) goPath(p) else toast("تعذر قراءة المسار من التطبيق")
@@ -464,12 +526,15 @@ class MainActivity : Activity() {
     }
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus && bridgeOn) {
+        if (hasFocus && bridgeOn && bridgeAway) {
+            bridgeOn = false
+            bridgeAway = false
             val t = clipText()
-            if (t.isNotBlank() && t != bridgeOld && looksPath(t)) {
-                bridgeOn = false
-                toast("فتح المسار المنسوخ…")
+            if (t.isNotBlank() && looksPath(t)) {
+                toast(if (t == bridgeOld) "الحافظة لم تتغير — فتحت المسار الأصلي" else "فتح المسار المنسوخ…")
                 goPath(t)
+            } else {
+                toast("لم أجد مسارًا في الحافظة — انسخ مسار المجلد ثم اضغط 📥 لصق")
             }
         }
     }
@@ -586,7 +651,16 @@ class MainActivity : Activity() {
         copyRow.addView(chip("📋 المسار") { copyPath() }, lp(0, WRAP, 1f, 2))
         copyRow.addView(chip("📋 مسار My Files") { copyMyFiles() }, lp(0, WRAP, 1f, 2))
         copyRow.addView(chip("📄 المحتوى") { copyContent() }, lp(0, WRAP, 1f, 2))
-        root.addView(copyRow, lp(MATCH, WRAP, 0f, 0, 0, 8))
+        root.addView(copyRow, lp(MATCH, WRAP, 0f, 0, 0, 4))
+        openBtn = chip("") { openProtected() }
+        openBtn.setOnLongClickListener {
+            launchTree()
+            true
+        }
+        val row2 = LinearLayout(this)
+        row2.addView(chip("📤 نسخ للشات (مسار + محتوى)") { copyForChat() }, lp(0, WRAP, 1f, 2))
+        row2.addView(openBtn, lp(0, WRAP, 1f, 2))
+        root.addView(row2, lp(MATCH, WRAP, 0f, 0, 0, 8))
         stats = LinearLayout(this)
         root.addView(stats, lp(MATCH, WRAP, 0f, 0, 0, 8))
         distBar = LinearLayout(this)
@@ -624,7 +698,7 @@ class MainActivity : Activity() {
         emptyView = tv("", 15f, C.SUB)
         emptyView.gravity = Gravity.CENTER
         shzBtn = chip("⚡ تفعيل Shizuku (الحل الجذري)", C.BG, C.GREEN) { askShizuku() }
-        grantBtn = chip("🔓 فتح بتطبيق تختاره (كل التطبيقات)", C.BG, C.CYAN) { askSaf() }
+        grantBtn = chip("🔓 منتقي النظام (أندرويد 11-12)", C.BG, C.CYAN) { askSaf() }
         emptyBox = LinearLayout(this)
         emptyBox.orientation = LinearLayout.VERTICAL
         emptyBox.gravity = Gravity.CENTER
@@ -747,6 +821,7 @@ class MainActivity : Activity() {
         if (p.startsWith("/storage/self/primary")) p = ext + p.removePrefix("/storage/self/primary")
         if (!p.startsWith("/")) p = "$ext/$p"
         val f = File(p)
+        var opened = true
         when {
             f.isDirectory -> go(f)
             f.isFile -> {
@@ -754,8 +829,12 @@ class MainActivity : Activity() {
                 toast("هذا ملف — فتحت مجلده")
             }
             disk.saf.prot(f) -> go(f)
-            else -> toast("المسار غير موجود:\n$p")
+            else -> {
+                opened = false
+                toast("المسار غير موجود:\n$p")
+            }
         }
+        if (opened && needGrant && !home) askShizuku()
     }
     private fun pastePath() {
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -834,7 +913,7 @@ class MainActivity : Activity() {
         if (items.isEmpty()) return
         clip("paths", items.joinToString("\n") { it.file.absolutePath }, "تم نسخ ${items.size} مسار")
     }
-    private fun copyContent() {
+    private fun contentText(): String {
         val sb = StringBuilder()
         sb.append("📂 المسار: ").append(if (home) "الرئيسية" else cur.absolutePath).append('\n')
         if (!home) sb.append("📍 My Files: ").append(myFilesPath()).append('\n')
@@ -855,7 +934,22 @@ class MainActivity : Activity() {
             sb.append('\n')
         }
         if (entries.size > shown.size) sb.append("... و").append(entries.size - shown.size).append(" عنصر آخر\n")
-        clip("content", sb.toString(), "تم نسخ محتوى المجلد (${shown.size} عنصر)")
+        return sb.toString()
+    }
+    private fun copyContent() {
+        clip("content", contentText(), "تم نسخ محتوى المجلد (${minOf(entries.size, 1000)} عنصر)")
+    }
+    private fun copyForChat() {
+        val sb = StringBuilder()
+        sb.append("📱 Android ").append(Build.VERSION.RELEASE).append(" (API ").append(Build.VERSION.SDK_INT).append(")\n")
+        val z = if (Shz.ready()) "جاهز" else if (Shz.granted()) "مسموح وغير متصل" else if (Shz.alive()) "يعمل بدون إذن" else "غير مشغّل"
+        sb.append("⚡ Shizuku: ").append(z).append('\n')
+        if (!home) {
+            sb.append("🔒 محمي: ").append(if (disk.saf.prot(cur)) "نعم" else "لا")
+            sb.append(" • SAF: ").append(if (disk.saf.find(cur) != null) "مُنح" else "لا").append('\n')
+        }
+        sb.append(contentText())
+        clip("chat", sb.toString(), "📤 تم نسخ المسار والمحتوى — الصقه في الشات")
     }
     private fun go(dir: File) {
         bridgeOn = false
@@ -939,6 +1033,7 @@ class MainActivity : Activity() {
         }
         sortBtn.text = arrayOf("⇅ الأكبر أولاً", "⇅ الأصغر أولاً", "⇅ حسب الاسم")[sortMode]
         hidBtn.text = if (showHidden) "👻 المخفي: ظاهر" else "👻 المخفي: مخفي"
+        updateOpenBtn()
         val known = entries.filter { it.size > 0 }.sumOf { it.size }
         adapter.total = if (known > 0) known else 1L
         val hiddenCount = all.count { it.hidden }
@@ -992,7 +1087,7 @@ class MainActivity : Activity() {
         shzBtn.visibility = showBtns
         emptyView.text = when {
             all.isNotEmpty() -> "👻\nكل العناصر هنا مخفية\nاضغط زر «المخفي» لإظهارها"
-            needGrant -> "🔒\nهذا المجلد محمي من النظام\n\n⚡ الحل الجذري: Shizuku (أندرويد 11 → 15)\n🔓 أو افتحه بأي تطبيق تختاره"
+            needGrant -> "🔒\nهذا المجلد محمي من النظام\n\n⚡ الحل الجذري: Shizuku (أندرويد 11 → 15)\n🔓 أو منتقي النظام (غالبًا أندرويد 11-12 فقط)"
             protectedDir -> "🔒\nلا يمكن قراءة هذا المجلد"
             else -> "📭\nالمجلد فارغ"
         }
