@@ -110,6 +110,8 @@ class MainActivity : Activity() {
     private lateinit var selAllBtn: TextView
     private lateinit var hidBtn: TextView
     private lateinit var openBtn: TextView
+    private lateinit var eyeBtn: TextView
+    private lateinit var readBtn: TextView
     private val adapter = Adapter()
     private val refreshRun = Runnable {
         scheduled = false
@@ -403,6 +405,48 @@ class MainActivity : Activity() {
         val s = savedApp()
         if (s == null) askSaf() else openWith(s)
     }
+    private fun askReader() {
+        AlertDialog.Builder(this)
+            .setTitle("👁 القراءة التلقائية من Files")
+            .setMessage(
+                "1) افتح إعدادات الوصولية وفعّل «خريطة المساحة».\n" +
+                    "2) لو الخيار رمادي (أندرويد 13+): معلومات التطبيق ثم ⋮ ثم «السماح بالإعدادات المقيّدة» وارجع للخطوة 1.\n\n" +
+                    "بعدها: ادخل المجلد المحمي في Files وسيتعرف عليه التطبيق ويقرأ ملفاته ويرجعك تلقائيًا.\n\n" +
+                    "الخدمة تقرأ شاشة مدير ملفات النظام فقط (documentsui)."
+            )
+            .setPositiveButton("فتح الوصولية") { _, _ ->
+                try {
+                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                } catch (e: Exception) {
+                    toast("تعذر الفتح")
+                }
+            }
+            .setNeutralButton("معلومات التطبيق") { _, _ ->
+                try {
+                    startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+                } catch (e: Exception) {
+                    toast("تعذر الفتح")
+                }
+            }
+            .setNegativeButton("إلغاء", null)
+            .show()
+    }
+    private fun readFromFiles() {
+        if (!Snap.on()) {
+            askReader()
+            return
+        }
+        val s = savedApp()
+        if (s == null) askSaf() else openWith(s)
+    }
+    private fun snapEntry(r: Row): Entry {
+        val f = File(cur, r.name)
+        val e = if (r.dir) Entry(f, Kind.FOLDER, 0L, r.count, false) else Entry(f, kindOf(f), r.size, 0, false)
+        val d = if (r.date.isEmpty()) "" else " • " + r.date
+        val body = if (r.dir) "مجلد" + (if (r.count > 0) " • ${r.count} عنصر" else "") else Fmt.size(r.size) + " • " + e.kind.label
+        e.note = "👁 " + body + d
+        return e
+    }
     private fun launchTree() {
         try {
             chooseApp("افتح المجلد باستخدام أي تطبيق") { app ->
@@ -416,17 +460,26 @@ class MainActivity : Activity() {
     }
     private fun openWith(app: AppItem) {
         try {
-            for (t in pickIntents(app.pkg)) {
-                if (packageManager.queryIntentActivities(t, 0).isNotEmpty()) {
-                    startPick(t)
-                    return
+            val auto = Snap.on()
+            if (!auto) {
+                for (t in pickIntents(app.pkg)) {
+                    if (packageManager.queryIntentActivities(t, 0).isNotEmpty()) {
+                        startPick(t)
+                        return
+                    }
                 }
             }
-            val tgt = if (disk.saf.prot(cur)) cur else File(Environment.getExternalStorageDirectory(), "Android/data")
-            clip("path", tgt.absolutePath, "ادخل المجلد المحمي في " + app.label + " وانسخ مساره ثم ارجع هنا")
-            bridgeOld = clipText()
-            bridgeOn = true
-            bridgeAway = false
+            val prot = disk.saf.prot(cur)
+            val tgt = if (prot) cur else File(Environment.getExternalStorageDirectory(), "Android/data")
+            if (auto) {
+                Snap.arm(tgt.path, prot)
+                toast(if (prot) "👁 جارٍ قراءة المجلد من Files…" else "👁 ادخل المجلد المحمي في Files وسيرجع التطبيق تلقائيًا")
+            } else {
+                clip("path", tgt.absolutePath, "ادخل المجلد المحمي في " + app.label + " وانسخ مساره ثم ارجع هنا")
+                bridgeOld = clipText()
+                bridgeOn = true
+                bridgeAway = false
+            }
             val sysUri = DocumentsContract.buildDocumentUri(AUTH, docIdOf(tgt))
             for (sp in arrayOf("com.google.android.documentsui", "com.android.documentsui")) {
                 if (app.pkg != DEF_APP && app.pkg != sp) continue
@@ -453,10 +506,12 @@ class MainActivity : Activity() {
                 startActivity(l)
             } else {
                 bridgeOn = false
+                Snap.armed = false
                 toast("تعذر فتح هذا التطبيق")
             }
         } catch (e: Exception) {
             bridgeOn = false
+            Snap.armed = false
             toast("تعذر فتح هذا التطبيق")
         }
     }
@@ -498,6 +553,11 @@ class MainActivity : Activity() {
         return null
     }
     private fun handleIncoming(i: Intent) {
+        val sp = i.getStringExtra("snap")
+        if (sp != null) {
+            go(File(sp))
+            return
+        }
         val t = i.getStringExtra(Intent.EXTRA_TEXT)
         val d = i.data
         val s = i.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
@@ -604,6 +664,14 @@ class MainActivity : Activity() {
         val head = LinearLayout(this)
         head.gravity = Gravity.CENTER_VERTICAL
         head.addView(tv("🗂️ خريطة المساحة", 20f, C.TEXT, true), lp(0, WRAP, 1f))
+        eyeBtn = chip("👁") {
+            if (Snap.on()) toast("👁 القراءة التلقائية شغالة") else askReader()
+        }
+        eyeBtn.setOnLongClickListener {
+            clip("dump", if (Snap.dump.isEmpty()) "لا يوجد تشخيص بعد — فعّل 👁 ثم افتح Files من زر 📂" else Snap.dump, "🐞 تم نسخ تشخيص شاشة Files")
+            true
+        }
+        head.addView(eyeBtn, lp(WRAP, WRAP, 0f, 3))
         head.addView(chip("🔄") {
             disk.cache.clear()
             if (home) goHome() else load()
@@ -699,12 +767,14 @@ class MainActivity : Activity() {
         emptyView.gravity = Gravity.CENTER
         shzBtn = chip("⚡ تفعيل Shizuku (الحل الجذري)", C.BG, C.GREEN) { askShizuku() }
         grantBtn = chip("🔓 منتقي النظام (أندرويد 11-12)", C.BG, C.CYAN) { askSaf() }
+        readBtn = chip("👁 اقرأ هذا المجلد من Files", C.BG, C.AMBER) { readFromFiles() }
         emptyBox = LinearLayout(this)
         emptyBox.orientation = LinearLayout.VERTICAL
         emptyBox.gravity = Gravity.CENTER
         emptyBox.visibility = View.GONE
         emptyBox.addView(emptyView, lp(MATCH, WRAP))
-        emptyBox.addView(shzBtn, lp(WRAP, WRAP, 0f, 0, 12, 0))
+        emptyBox.addView(readBtn, lp(WRAP, WRAP, 0f, 0, 12, 0))
+        emptyBox.addView(shzBtn, lp(WRAP, WRAP, 0f, 0, 8, 0))
         emptyBox.addView(grantBtn, lp(WRAP, WRAP, 0f, 0, 8, 0))
         root.addView(emptyBox, lp(MATCH, 0, 1f))
         selBar = LinearLayout(this)
@@ -834,7 +904,9 @@ class MainActivity : Activity() {
                 toast("المسار غير موجود:\n$p")
             }
         }
-        if (opened && needGrant && !home) askShizuku()
+        if (opened && needGrant && !home) {
+            if (Snap.on()) readFromFiles() else askShizuku()
+        }
     }
     private fun pastePath() {
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -980,8 +1052,10 @@ class MainActivity : Activity() {
         ui.removeCallbacks(refreshRun)
         scheduled = false
         home = false
-        val kids = disk.children(cur)
+        var kids: List<Entry>? = disk.children(cur)
         val isProt = disk.saf.prot(cur)
+        val snap = Snap.dirs[cur.path]
+        if (isProt && snap != null && (kids == null || kids.isEmpty())) kids = snap.map { snapEntry(it) }
         protectedDir = kids == null || (kids.isEmpty() && isProt)
         needGrant = isProt && !Shz.ready() && disk.saf.find(cur) == null && (kids == null || kids.isEmpty())
         all = ArrayList(kids ?: emptyList<Entry>())
@@ -1034,6 +1108,7 @@ class MainActivity : Activity() {
         sortBtn.text = arrayOf("⇅ الأكبر أولاً", "⇅ الأصغر أولاً", "⇅ حسب الاسم")[sortMode]
         hidBtn.text = if (showHidden) "👻 المخفي: ظاهر" else "👻 المخفي: مخفي"
         updateOpenBtn()
+        eyeBtn.text = if (Snap.on()) "👁✓" else "👁"
         val known = entries.filter { it.size > 0 }.sumOf { it.size }
         adapter.total = if (known > 0) known else 1L
         val hiddenCount = all.count { it.hidden }
@@ -1085,9 +1160,10 @@ class MainActivity : Activity() {
         val showBtns = if (empty && needGrant) View.VISIBLE else View.GONE
         grantBtn.visibility = showBtns
         shzBtn.visibility = showBtns
+        readBtn.visibility = showBtns
         emptyView.text = when {
             all.isNotEmpty() -> "👻\nكل العناصر هنا مخفية\nاضغط زر «المخفي» لإظهارها"
-            needGrant -> "🔒\nهذا المجلد محمي من النظام\n\n⚡ الحل الجذري: Shizuku (أندرويد 11 → 15)\n🔓 أو منتقي النظام (غالبًا أندرويد 11-12 فقط)"
+            needGrant -> "🔒\nهذا المجلد محمي من النظام\n\n👁 القراءة التلقائية من Files (زر أصفر)\n⚡ أو Shizuku (أندرويد 11 → 15)\n🔓 أو منتقي النظام (غالبًا أندرويد 11-12 فقط)"
             protectedDir -> "🔒\nلا يمكن قراءة هذا المجلد"
             else -> "📭\nالمجلد فارغ"
         }
@@ -1095,7 +1171,12 @@ class MainActivity : Activity() {
         updateSel()
     }
     private fun clickEntry(e: Entry) {
-        if (e.kind == Kind.FOLDER) go(e.file) else openFile(e)
+        if (e.kind == Kind.FOLDER) {
+            go(e.file)
+            if (needGrant && Snap.on() && Snap.dirs[e.file.path] == null) readFromFiles()
+        } else {
+            openFile(e)
+        }
     }
     private fun openUri(uri: Uri, f: File) {
         try {
