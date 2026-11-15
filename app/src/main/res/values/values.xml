@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">خريطة المساحة</string>
+    <string name="acc_desc">تقرأ شاشة مدير ملفات النظام (documentsui) فقط لمعرفة المجلد المفتوح وقائمة ملفاته، ثم تعيدك تلقائيًا إلى خريطة المساحة.</string>
 
     <style name="AppTheme" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">#0B1220</item>
