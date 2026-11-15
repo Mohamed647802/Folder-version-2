@@ -52,6 +52,7 @@ class Entry(
 ) {
     var label: String? = null
     var note: String = ""
+    var priv: Boolean = false
     val hidden: Boolean get() = file.name.startsWith(".")
 }
 object Fs {
@@ -124,6 +125,10 @@ class Disk(ctx: Context) {
     private val skip = setOf("/proc", "/sys", "/dev")
     fun children(dir: File): List<Entry>? {
         if (saf.prot(dir)) {
+            if (Shz.ready()) {
+                val l = Shz.list(dir, this)
+                if (l != null) return l
+            }
             val g = saf.find(dir)
             if (g != null) return saf.list(g, dir, this)
         }
@@ -131,7 +136,7 @@ class Disk(ctx: Context) {
         return kids.map { entry(it) }
     }
     fun entry(f: File): Entry {
-        if (saf.prot(f) && saf.find(f) != null) return Entry(f, Kind.FOLDER, cache[f.path] ?: -1L, 0, false)
+        if (saf.prot(f) && (Shz.ready() || saf.find(f) != null)) return Entry(f, Kind.FOLDER, cache[f.path] ?: -1L, 0, false)
         if (!f.isDirectory) return Entry(f, kindOf(f), f.length(), 0, false)
         val l = f.list()
         val size = if (l == null) 0L else (cache[f.path] ?: -1L)
@@ -140,6 +145,7 @@ class Disk(ctx: Context) {
     fun size(f: File): Long {
         if (Thread.currentThread().isInterrupted) throw InterruptedException()
         if (saf.prot(f)) {
+            if (Shz.ready()) return Shz.size(f, this)
             val g = saf.find(f)
             if (g != null) return saf.size(g, f, this)
         }
