@@ -20,7 +20,9 @@ import android.os.StatFs
 import android.os.storage.StorageManager
 import android.provider.DocumentsContract
 import android.provider.Settings
+import android.text.Editable
 import android.text.InputType
+import android.text.TextWatcher
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.KeyEvent
@@ -29,6 +31,7 @@ import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.webkit.MimeTypeMap
+import android.widget.ArrayAdapter
 import android.widget.BaseAdapter
 import android.widget.CheckBox
 import android.widget.EditText
@@ -248,47 +251,135 @@ class MainActivity : Activity() {
             connectShz()
         }
     }
+    private val AUTH = "com.android.externalstorage.documents"
+    private class AppItem(val label: String, val pkg: String, val picker: Boolean)
     private fun askSaf() {
         AlertDialog.Builder(this)
-            .setTitle("🔓 فتح عبر منتقي النظام")
-            .setMessage("ستظهر قائمة بالتطبيقات القادرة على اختيار المجلد (النظام أو أي تطبيق ملفات آخر). اختر واحدًا ثم «استخدام هذا المجلد» ثم «السماح». على أندرويد 13+ النظام يخفي هذه المجلدات — استخدم Shizuku بدلاً منه.")
+            .setTitle("🔓 فتح المجلد المحمي")
+            .setMessage("ستظهر قائمة بكل التطبيقات المثبتة على جهازك، اختر أي تطبيق تريده. التطبيقات القادرة على اختيار المجلد عليها علامة 📂. على أندرويد 13+ النظام يخفي هذه المجلدات — استخدم Shizuku بدلاً منه.")
             .setPositiveButton("متابعة") { _, _ -> launchTree() }
             .setNegativeButton("إلغاء", null)
             .show()
     }
+    private fun docIdOf(f: File): String {
+        val ext = Environment.getExternalStorageDirectory().path
+        if (f.path == ext || f.path.startsWith("$ext/")) return "primary:" + f.path.removePrefix(ext).trimStart('/')
+        val parts = f.path.split("/")
+        return (parts.getOrNull(2) ?: "primary") + ":" + parts.drop(3).joinToString("/")
+    }
+    private fun treeIntent(): Intent {
+        val sub = if (cur.path.contains("/Android/obb")) "Android/obb" else "Android/data"
+        val id = docIdOf(cur)
+        val vol = id.substringBefore(':')
+        val tree = DocumentsContract.buildTreeDocumentUri(AUTH, "$vol:$sub")
+        val init = DocumentsContract.buildDocumentUriUsingTree(tree, if (disk.saf.prot(cur)) id else "$vol:$sub")
+        val i = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+        i.putExtra(DocumentsContract.EXTRA_INITIAL_URI, init)
+        i.addFlags(
+            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
+        )
+        return i
+    }
+    private fun allApps(): List<AppItem> {
+        val pk = HashSet<String>()
+        val picks = packageManager.queryIntentActivities(treeIntent(), 0)
+        for (r in picks) pk.add(r.activityInfo.packageName)
+        val main = Intent(Intent.ACTION_MAIN)
+        main.addCategory(Intent.CATEGORY_LAUNCHER)
+        val seen = HashSet<String>()
+        val out = ArrayList<AppItem>()
+        for (r in packageManager.queryIntentActivities(main, 0)) {
+            val p = r.activityInfo.packageName
+            if (p == packageName || !seen.add(p)) continue
+            out.add(AppItem(r.loadLabel(packageManager).toString(), p, pk.contains(p)))
+        }
+        for (r in picks) {
+            val p = r.activityInfo.packageName
+            if (p == packageName || !seen.add(p)) continue
+            out.add(AppItem(r.loadLabel(packageManager).toString(), p, true))
+        }
+        out.sortWith(compareBy<AppItem> { !it.picker }.thenBy { it.label.lowercase() })
+        return out
+    }
+    private fun chooseApp(title: String, onPick: (AppItem) -> Unit) {
+        val apps = allApps()
+        var shown: List<AppItem> = apps
+        val ad = ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, ArrayList<String>())
+        fun fill(q: String) {
+            shown = apps.filter { it.label.contains(q, true) || it.pkg.contains(q, true) }
+            ad.clear()
+            ad.addAll(shown.map { (if (it.picker) "📂 " else "") + it.label + "\n" + it.pkg })
+            ad.notifyDataSetChanged()
+        }
+        val search = EditText(this)
+        search.setSingleLine(true)
+        search.hint = "ابحث عن تطبيق…"
+        search.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {
+            }
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+            }
+            override fun afterTextChanged(s: Editable?) {
+                fill(s?.toString() ?: "")
+            }
+        })
+        val lv = ListView(this)
+        lv.adapter = ad
+        fill("")
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding(dp(12), dp(8), dp(12), 0)
+        box.addView(search, lp(MATCH, WRAP))
+        box.addView(lv, lp(MATCH, dp(360)))
+        val dlg = AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(box)
+            .setNegativeButton("إلغاء", null)
+            .setNeutralButton("🧭 اختيار النظام") { _, _ ->
+                startPick(Intent.createChooser(treeIntent(), "اختر تطبيقًا لفتح المجلد"))
+            }
+            .create()
+        lv.setOnItemClickListener { _, _, pos, _ ->
+            dlg.dismiss()
+            onPick(shown[pos])
+        }
+        dlg.show()
+    }
     private fun launchTree() {
         try {
-            val sub = if (cur.path.contains("/Android/obb")) "Android/obb" else "Android/data"
-            val ext = Environment.getExternalStorageDirectory().path
-            val vol = if (cur.path.startsWith(ext)) "primary" else (cur.path.split("/").getOrNull(2) ?: "primary")
-            val auth = "com.android.externalstorage.documents"
-            val tree = DocumentsContract.buildTreeDocumentUri(auth, "$vol:$sub")
-            val init = DocumentsContract.buildDocumentUriUsingTree(tree, "$vol:$sub")
-            val i = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
-            i.putExtra(DocumentsContract.EXTRA_INITIAL_URI, init)
-            i.addFlags(
-                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
-                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
-            )
-            val apps = packageManager.queryIntentActivities(i, 0)
-            val names = ArrayList<String>()
-            for (r in apps) names.add(r.loadLabel(packageManager).toString() + "\n" + r.activityInfo.packageName)
-            names.add("🧭 اختيار النظام: كل التطبيقات المتاحة")
-            AlertDialog.Builder(this)
-                .setTitle("افتح المجلد باستخدام…")
-                .setItems(names.toTypedArray()) { _, w ->
-                    if (w < apps.size) {
-                        val i2 = Intent(i)
-                        i2.setClassName(apps[w].activityInfo.packageName, apps[w].activityInfo.name)
-                        startPick(i2)
-                    } else {
-                        startPick(Intent.createChooser(i, "اختر تطبيقًا لفتح المجلد"))
-                    }
-                }
-                .setNegativeButton("إلغاء", null)
-                .show()
+            chooseApp("افتح المجلد باستخدام أي تطبيق") { app -> openWith(app) }
         } catch (e: Exception) {
-            toast("تعذر فتح المنتقي")
+            toast("تعذر عرض التطبيقات")
+        }
+    }
+    private fun openWith(app: AppItem) {
+        try {
+            val t = treeIntent()
+            t.setPackage(app.pkg)
+            if (packageManager.queryIntentActivities(t, 0).isNotEmpty()) {
+                startPick(t)
+                return
+            }
+            clip("path", cur.absolutePath, "المسار منسوخ: " + cur.absolutePath)
+            val v = Intent(Intent.ACTION_VIEW)
+            v.setDataAndType(DocumentsContract.buildDocumentUri(AUTH, docIdOf(cur)), "vnd.android.document/directory")
+            v.setPackage(app.pkg)
+            v.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            try {
+                startActivity(v)
+                return
+            } catch (x: Exception) {
+            }
+            val l = packageManager.getLaunchIntentForPackage(app.pkg)
+            if (l != null) {
+                startActivity(l)
+                toast("فتحت " + app.label + " — الصق المسار هناك")
+            } else {
+                toast("تعذر فتح هذا التطبيق")
+            }
+        } catch (e: Exception) {
+            toast("تعذر فتح هذا التطبيق")
         }
     }
     @Suppress("DEPRECATION")
@@ -313,7 +404,7 @@ class MainActivity : Activity() {
                 toast("رفض النظام هذا المجلد")
             }
         } else {
-            toast("لم يتم منح الوصول — استخدم Shizuku")
+            toast("لم يتم منح الوصول — جرّب تطبيقًا آخر أو Shizuku")
         }
     }
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
@@ -444,7 +535,7 @@ class MainActivity : Activity() {
         emptyView = tv("", 15f, C.SUB)
         emptyView.gravity = Gravity.CENTER
         shzBtn = chip("⚡ تفعيل Shizuku (الحل الجذري)", C.BG, C.GREEN) { askShizuku() }
-        grantBtn = chip("🔓 منتقي النظام (أندرويد 11-12)", C.BG, C.CYAN) { askSaf() }
+        grantBtn = chip("🔓 فتح بتطبيق تختاره (كل التطبيقات)", C.BG, C.CYAN) { askSaf() }
         emptyBox = LinearLayout(this)
         emptyBox.orientation = LinearLayout.VERTICAL
         emptyBox.gravity = Gravity.CENTER
@@ -810,7 +901,7 @@ class MainActivity : Activity() {
         shzBtn.visibility = showBtns
         emptyView.text = when {
             all.isNotEmpty() -> "👻\nكل العناصر هنا مخفية\nاضغط زر «المخفي» لإظهارها"
-            needGrant -> "🔒\nهذا المجلد محمي من النظام\n\n⚡ الحل الجذري: Shizuku (أندرويد 11 → 15)\n🔓 أو منتقي النظام (غالبًا أندرويد 11-12 فقط)"
+            needGrant -> "🔒\nهذا المجلد محمي من النظام\n\n⚡ الحل الجذري: Shizuku (أندرويد 11 → 15)\n🔓 أو افتحه بأي تطبيق تختاره"
             protectedDir -> "🔒\nلا يمكن قراءة هذا المجلد"
             else -> "📭\nالمجلد فارغ"
         }
