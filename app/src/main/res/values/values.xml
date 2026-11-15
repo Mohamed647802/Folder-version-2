@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">خريطة المساحة</string>
+
+    <style name="AppTheme" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0B1220</item>
+        <item name="android:colorBackground">#0B1220</item>
+        <item name="android:colorPrimary">#0B1220</item>
+        <item name="android:colorAccent">#22D3EE</item>
+        <item name="android:colorControlActivated">#22D3EE</item>
+        <item name="android:statusBarColor">#0B1220</item>
+        <item name="android:navigationBarColor">#0B1220</item>
+        <item name="android:textColorPrimary">#E5E7EB</item>
+    </style>
+</resources>
