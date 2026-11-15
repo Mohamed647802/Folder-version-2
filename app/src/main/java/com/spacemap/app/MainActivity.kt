@@ -20,13 +20,18 @@ import android.os.StatFs
 import android.os.storage.StorageManager
 import android.provider.DocumentsContract
 import android.provider.Settings
+import android.text.InputType
 import android.text.TextUtils
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.webkit.MimeTypeMap
 import android.widget.BaseAdapter
 import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
@@ -41,6 +46,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import rikka.shizuku.Shizuku
 private object C {
     val BG = 0xFF0B1220.toInt()
     val CARD = 0xFF131C2E.toInt()
@@ -56,6 +62,7 @@ private object C {
     val RED = 0xFFEF4444.toInt()
 }
 class MainActivity : Activity() {
+    private val SHZ = "moe.shizuku.privileged.api"
     private val disk by lazy { Disk(applicationContext) }
     private val ui = Handler(Looper.getMainLooper())
     private val df = SimpleDateFormat("yyyy-MM-dd", Locale.US)
@@ -77,6 +84,7 @@ class MainActivity : Activity() {
     private var needGrant = false
     private var home = false
     private var showHidden = true
+    private lateinit var pathEdit: EditText
     private lateinit var crumbs: LinearLayout
     private lateinit var crumbScroll: HorizontalScrollView
     private lateinit var stats: LinearLayout
@@ -85,6 +93,7 @@ class MainActivity : Activity() {
     private lateinit var emptyBox: LinearLayout
     private lateinit var emptyView: TextView
     private lateinit var grantBtn: TextView
+    private lateinit var shzBtn: TextView
     private lateinit var busy: ProgressBar
     private lateinit var selBar: LinearLayout
     private lateinit var selText: TextView
@@ -96,9 +105,22 @@ class MainActivity : Activity() {
         scheduled = false
         refresh()
     }
+    private val binderL = Shizuku.OnBinderReceivedListener {
+        ui.post { if (hasAccess() && Shz.granted()) connectShz() }
+    }
+    private val permL = Shizuku.OnRequestPermissionResultListener { _, r ->
+        ui.post {
+            if (r == PackageManager.PERMISSION_GRANTED) connectShz() else toast("لم يتم منح إذن Shizuku")
+        }
+    }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildUi())
+        try {
+            Shizuku.addBinderReceivedListenerSticky(binderL)
+            Shizuku.addRequestPermissionResultListener(permL)
+        } catch (e: Throwable) {
+        }
     }
     override fun onResume() {
         super.onResume()
@@ -107,12 +129,18 @@ class MainActivity : Activity() {
                 started = true
                 go(Environment.getExternalStorageDirectory())
             }
+            if (!Shz.ready() && Shz.granted()) connectShz()
         } else if (!asking) {
             askAccess()
         }
     }
     override fun onDestroy() {
         pool?.shutdownNow()
+        try {
+            Shizuku.removeBinderReceivedListener(binderL)
+            Shizuku.removeRequestPermissionResultListener(permL)
+        } catch (e: Throwable) {
+        }
         super.onDestroy()
     }
     private fun hasAccess(): Boolean =
@@ -148,10 +176,82 @@ class MainActivity : Activity() {
             startActivity(Intent(Settings.ACTION_SETTINGS))
         }
     }
+    private fun openUrl(primary: String, fallback: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(primary)))
+        } catch (e: Exception) {
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(fallback)))
+            } catch (x: Exception) {
+                toast("تعذر الفتح")
+            }
+        }
+    }
+    private fun connectShz() {
+        Shz.connect(packageName) {
+            ui.post {
+                if (Shz.ready()) {
+                    toast("⚡ Shizuku جاهز — المجلدات المحمية مفتوحة")
+                    disk.cache.clear()
+                    if (!home) load()
+                }
+            }
+        }
+    }
+    private fun askShizuku() {
+        if (Shz.ready()) {
+            toast("⚡ Shizuku متصل بالفعل")
+            return
+        }
+        val installed = try {
+            packageManager.getPackageInfo(SHZ, 0)
+            true
+        } catch (e: Exception) {
+            false
+        }
+        if (!installed) {
+            AlertDialog.Builder(this)
+                .setTitle("⚡ Shizuku غير مثبت")
+                .setMessage(
+                    "الحل الجذري لمجلدات Android/data و Android/obb:\n\n" +
+                        "1) ثبّت تطبيق Shizuku\n" +
+                        "2) افتحه واضغط Start عبر Wireless debugging (مرة بعد كل إعادة تشغيل)\n" +
+                        "3) ارجع هنا واضغط الزر مرة ثانية ثم اسمح"
+                )
+                .setPositiveButton("تثبيت Shizuku") { _, _ ->
+                    openUrl("market://details?id=$SHZ", "https://github.com/RikkaApps/Shizuku/releases")
+                }
+                .setNegativeButton("إلغاء", null)
+                .show()
+        } else if (!Shz.alive()) {
+            AlertDialog.Builder(this)
+                .setTitle("⚡ Shizuku غير مشغّل")
+                .setMessage(
+                    "افتح Shizuku ثم:\n" +
+                        "• فعّل Developer options ثم Wireless debugging من إعدادات الجهاز\n" +
+                        "• في Shizuku اختر Start via Wireless debugging (Pairing مرة واحدة)\n" +
+                        "• بعد ما يظهر Shizuku is running ارجع هنا واضغط الزر"
+                )
+                .setPositiveButton("فتح Shizuku") { _, _ ->
+                    val i = packageManager.getLaunchIntentForPackage(SHZ)
+                    if (i != null) startActivity(i) else toast("تعذر فتح Shizuku")
+                }
+                .setNegativeButton("إلغاء", null)
+                .show()
+        } else if (!Shz.granted()) {
+            try {
+                Shizuku.requestPermission(88)
+            } catch (e: Throwable) {
+                toast("تعذر طلب إذن Shizuku")
+            }
+        } else {
+            connectShz()
+        }
+    }
     private fun askSaf() {
         AlertDialog.Builder(this)
-            .setTitle("🔓 فتح المجلد المحمي")
-            .setMessage("سيفتح منتقي ملفات النظام عند هذا المجلد. اضغط «استخدام هذا المجلد» ثم «السماح». إذا رفض النظام (أندرويد 13+) فهذه حدود النظام.")
+            .setTitle("🔓 فتح عبر منتقي النظام")
+            .setMessage("سيفتح منتقي ملفات النظام عند هذا المجلد. اضغط «استخدام هذا المجلد» ثم «السماح». على أندرويد 13+ النظام يخفي هذه المجلدات — استخدم Shizuku بدلاً منه.")
             .setPositiveButton("متابعة") { _, _ -> launchTree() }
             .setNegativeButton("إلغاء", null)
             .show()
@@ -189,7 +289,7 @@ class MainActivity : Activity() {
                 toast("رفض النظام هذا المجلد")
             }
         } else {
-            toast("لم يتم منح الوصول — أندرويد 13+ قد يمنع هذا المجلد")
+            toast("لم يتم منح الوصول — استخدم Shizuku")
         }
     }
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
@@ -241,6 +341,34 @@ class MainActivity : Activity() {
         }, lp(WRAP, WRAP, 0f, 3))
         head.addView(chip("🗑 المهملات") { showTrash() }, lp(WRAP, WRAP, 0f, 3))
         root.addView(head, lp(MATCH, WRAP, 0f, 0, 0, 8))
+        pathEdit = EditText(this)
+        pathEdit.setSingleLine(true)
+        pathEdit.textSize = 13f
+        pathEdit.setTextColor(C.TEXT)
+        pathEdit.setHintTextColor(C.SUB)
+        pathEdit.hint = "الصق أو اكتب مسارًا ثم اضغط اذهب"
+        pathEdit.layoutDirection = View.LAYOUT_DIRECTION_LTR
+        pathEdit.textDirection = View.TEXT_DIRECTION_LTR
+        pathEdit.gravity = Gravity.CENTER_VERTICAL or Gravity.START
+        pathEdit.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+        pathEdit.imeOptions = EditorInfo.IME_ACTION_GO
+        pathEdit.setPadding(dp(10), dp(8), dp(10), dp(8))
+        pathEdit.background = box(C.CARD, 12, C.STROKE)
+        pathEdit.setOnEditorActionListener { _, actionId, ev ->
+            if (actionId == EditorInfo.IME_ACTION_GO || (ev != null && ev.keyCode == KeyEvent.KEYCODE_ENTER)) {
+                goPath(pathEdit.text.toString())
+                true
+            } else {
+                false
+            }
+        }
+        val pathRow = LinearLayout(this)
+        pathRow.layoutDirection = View.LAYOUT_DIRECTION_LTR
+        pathRow.gravity = Gravity.CENTER_VERTICAL
+        pathRow.addView(pathEdit, lp(0, WRAP, 1f, 2))
+        pathRow.addView(chip("📥 لصق") { pastePath() }, lp(WRAP, WRAP, 0f, 2))
+        pathRow.addView(chip("▶ اذهب") { goPath(pathEdit.text.toString()) }, lp(WRAP, WRAP, 0f, 2))
+        root.addView(pathRow, lp(MATCH, WRAP, 0f, 0, 0, 6))
         crumbScroll = HorizontalScrollView(this)
         crumbScroll.layoutDirection = View.LAYOUT_DIRECTION_LTR
         crumbScroll.isHorizontalScrollBarEnabled = false
@@ -291,13 +419,15 @@ class MainActivity : Activity() {
         root.addView(list, lp(MATCH, 0, 1f))
         emptyView = tv("", 15f, C.SUB)
         emptyView.gravity = Gravity.CENTER
-        grantBtn = chip("🔓 فتح المجلد المحمي", C.BG, C.CYAN) { askSaf() }
+        shzBtn = chip("⚡ تفعيل Shizuku (الحل الجذري)", C.BG, C.GREEN) { askShizuku() }
+        grantBtn = chip("🔓 منتقي النظام (أندرويد 11-12)", C.BG, C.CYAN) { askSaf() }
         emptyBox = LinearLayout(this)
         emptyBox.orientation = LinearLayout.VERTICAL
         emptyBox.gravity = Gravity.CENTER
         emptyBox.visibility = View.GONE
         emptyBox.addView(emptyView, lp(MATCH, WRAP))
-        emptyBox.addView(grantBtn, lp(WRAP, WRAP, 0f, 0, 12, 0))
+        emptyBox.addView(shzBtn, lp(WRAP, WRAP, 0f, 0, 12, 0))
+        emptyBox.addView(grantBtn, lp(WRAP, WRAP, 0f, 0, 8, 0))
         root.addView(emptyBox, lp(MATCH, 0, 1f))
         selBar = LinearLayout(this)
         selBar.gravity = Gravity.CENTER_VERTICAL
@@ -377,8 +507,69 @@ class MainActivity : Activity() {
         refresh()
         list.setSelection(0)
     }
+    private fun hideKb() {
+        try {
+            val im = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            im.hideSoftInputFromWindow(pathEdit.windowToken, 0)
+            pathEdit.clearFocus()
+        } catch (e: Exception) {
+        }
+    }
+    private fun goPath(raw: String) {
+        hideKb()
+        val labels = volumes()
+        var line = raw.trim()
+        for (l in raw.lines()) {
+            val t = l.trim().removePrefix("📂 المسار:").removePrefix("📍 My Files:").trim()
+            if (t.startsWith("/") || labels.any { t.startsWith(it.first, true) }) {
+                line = t
+                break
+            }
+        }
+        var p = line.trim().trim('"', '\'').removePrefix("file://").trim()
+        if (p.isEmpty()) {
+            goHome()
+            return
+        }
+        val ext = Environment.getExternalStorageDirectory().path
+        for ((label, f) in labels) {
+            if (p.equals(label, true) || p.startsWith("$label/", true)) {
+                p = f.path + p.substring(label.length)
+                break
+            }
+        }
+        if (p == "/sdcard" || p.startsWith("/sdcard/")) p = ext + p.removePrefix("/sdcard")
+        if (p.startsWith("/storage/self/primary")) p = ext + p.removePrefix("/storage/self/primary")
+        if (!p.startsWith("/")) p = "$ext/$p"
+        val f = File(p)
+        when {
+            f.isDirectory -> go(f)
+            f.isFile -> {
+                go(f.parentFile ?: File("/"))
+                toast("هذا ملف — فتحت مجلده")
+            }
+            disk.saf.prot(f) -> go(f)
+            else -> toast("المسار غير موجود:\n$p")
+        }
+    }
+    private fun pastePath() {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val clipData = cm.primaryClip
+        val t = if (clipData != null && clipData.itemCount > 0) {
+            clipData.getItemAt(0).coerceToText(this)?.toString() ?: ""
+        } else {
+            ""
+        }
+        if (t.isBlank()) {
+            toast("الحافظة فارغة")
+            return
+        }
+        pathEdit.setText(t.trim().lines().first())
+        goPath(t)
+    }
     private fun refreshCrumbs() {
         crumbs.removeAllViews()
+        pathEdit.setText(if (home) "" else cur.absolutePath)
         if (home) {
             addCrumb("🏠 الرئيسية", null, true)
         } else {
@@ -492,7 +683,7 @@ class MainActivity : Activity() {
         val kids = disk.children(cur)
         val isProt = disk.saf.prot(cur)
         protectedDir = kids == null || (kids.isEmpty() && isProt)
-        needGrant = isProt && disk.saf.find(cur) == null && (kids == null || kids.isEmpty())
+        needGrant = isProt && !Shz.ready() && disk.saf.find(cur) == null && (kids == null || kids.isEmpty())
         all = ArrayList(kids ?: emptyList<Entry>())
         refreshCrumbs()
         val todo = all.filter { it.size < 0 }
@@ -590,10 +781,12 @@ class MainActivity : Activity() {
         val empty = entries.isEmpty()
         list.visibility = if (empty) View.GONE else View.VISIBLE
         emptyBox.visibility = if (empty) View.VISIBLE else View.GONE
-        grantBtn.visibility = if (empty && needGrant) View.VISIBLE else View.GONE
+        val showBtns = if (empty && needGrant) View.VISIBLE else View.GONE
+        grantBtn.visibility = showBtns
+        shzBtn.visibility = showBtns
         emptyView.text = when {
             all.isNotEmpty() -> "👻\nكل العناصر هنا مخفية\nاضغط زر «المخفي» لإظهارها"
-            needGrant -> "🔒\nهذا المجلد محمي من النظام\nاضغط الزر بالأسفل لفتحه بصلاحية النظام"
+            needGrant -> "🔒\nهذا المجلد محمي من النظام\n\n⚡ الحل الجذري: Shizuku (أندرويد 11 → 15)\n🔓 أو منتقي النظام (غالبًا أندرويد 11-12 فقط)"
             protectedDir -> "🔒\nلا يمكن قراءة هذا المجلد"
             else -> "📭\nالمجلد فارغ"
         }
@@ -603,10 +796,8 @@ class MainActivity : Activity() {
     private fun clickEntry(e: Entry) {
         if (e.kind == Kind.FOLDER) go(e.file) else openFile(e)
     }
-    private fun openFile(e: Entry) {
+    private fun openUri(uri: Uri, f: File) {
         try {
-            val f = e.file
-            val uri = e.doc ?: FileProvider.getUriForFile(this, "$packageName.provider", f)
             val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(f.extension.lowercase()) ?: "*/*"
             val i = Intent(Intent.ACTION_VIEW)
             i.setDataAndType(uri, mime)
@@ -615,6 +806,38 @@ class MainActivity : Activity() {
         } catch (x: Exception) {
             toast("لا يوجد تطبيق يفتح هذا النوع من الملفات")
         }
+    }
+    private fun openFile(e: Entry) {
+        if (e.priv) {
+            openPriv(e)
+            return
+        }
+        try {
+            val uri = e.doc ?: FileProvider.getUriForFile(this, "$packageName.provider", e.file)
+            openUri(uri, e.file)
+        } catch (x: Exception) {
+            toast("تعذر فتح الملف")
+        }
+    }
+    private fun openPriv(e: Entry) {
+        busy.visibility = View.VISIBLE
+        Thread {
+            val dst = File(externalCacheDir ?: cacheDir, "shz/" + e.file.name)
+            dst.parentFile?.mkdirs()
+            val ok = Shz.copy(e.file, dst)
+            ui.post {
+                busy.visibility = if (pending > 0) View.VISIBLE else View.GONE
+                if (ok && dst.exists()) {
+                    try {
+                        openUri(FileProvider.getUriForFile(this, "$packageName.provider", dst), dst)
+                    } catch (x: Exception) {
+                        toast("تعذر فتح الملف")
+                    }
+                } else {
+                    toast("تعذر نسخ الملف المحمي")
+                }
+            }
+        }.start()
     }
     private fun toggle(e: Entry) {
         if (home || e.label != null) return
@@ -647,7 +870,7 @@ class MainActivity : Activity() {
         if (items.isEmpty()) return
         val sz = items.sumOf { maxOf(it.size, 0L) }
         val b = AlertDialog.Builder(this).setTitle("حذف ${items.size} عنصر")
-        if (items.any { it.doc != null }) {
+        if (items.any { it.doc != null || it.priv }) {
             b.setMessage("الحجم: ${Fmt.size(sz)}\n\nعناصر محمية (Android/data): الحذف نهائي فقط ولا يمكن التراجع.")
                 .setPositiveButton("⚠ حذف نهائي") { _, _ -> doDelete(items, true) }
                 .setNegativeButton("إلغاء", null)
@@ -672,9 +895,14 @@ class MainActivity : Activity() {
             for (e in items) {
                 try {
                     val sz = if (e.size >= 0) e.size else disk.size(e.file)
-                    val viaSaf = e.doc != null
-                    val moved: File? = if (permanent || viaSaf) null else Trash.moveIn(e.file)
-                    val good = if (viaSaf) disk.saf.delete(e.doc!!) else if (permanent) Fs.deleteTree(e.file) else moved != null
+                    val special = e.doc != null || e.priv
+                    val moved: File? = if (permanent || special) null else Trash.moveIn(e.file)
+                    val good = when {
+                        e.doc != null -> disk.saf.delete(e.doc!!)
+                        e.priv -> Shz.delete(e.file)
+                        permanent -> Fs.deleteTree(e.file)
+                        else -> moved != null
+                    }
                     if (good) {
                         ok++
                         disk.removed(e.file, sz)
@@ -798,7 +1026,7 @@ class MainActivity : Activity() {
             e.kind == Kind.FOLDER -> "${Fmt.size(e.size)} • ${e.count} عنصر"
             else -> "${Fmt.size(e.size)} • ${e.kind.label} • ${df.format(Date(e.mtime))}"
         }
-        h.meta.text = (if (hid) "👻 مخفي • " else "") + base
+        h.meta.text = (if (hid) "👻 مخفي • " else "") + (if (e.priv) "⚡ " else "") + base
         h.pct.text = if (e.size < 0) "…" else String.format(Locale.US, "%.1f%%", p)
         h.pct.setTextColor(col)
         val w = if (e.size < 0) 0f else maxOf(p.toFloat(), 1.5f)
