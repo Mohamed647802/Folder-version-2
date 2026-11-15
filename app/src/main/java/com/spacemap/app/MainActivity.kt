@@ -481,7 +481,7 @@ class MainActivity : Activity() {
             )
             .setPositiveButton("ابدأ") { _, _ ->
                 openWith(s)
-                Snap.startDeep(cur.path)
+                Snap.startDeep(cur.path, 2500)
             }
             .setNegativeButton("إلغاء", null)
             .show()
@@ -512,6 +512,7 @@ class MainActivity : Activity() {
             val tgt = if (prot) cur else File(Environment.getExternalStorageDirectory(), "Android/data")
             if (auto) {
                 Snap.arm(tgt.path, prot)
+                if (prot && !tgt.path.endsWith("/Android/data") && !tgt.path.endsWith("/Android/obb")) Snap.startDeep(tgt.path, 150)
                 toast(if (prot) "👁 جارٍ قراءة المجلد من Files…" else "👁 ادخل المجلد المحمي في Files وسيرجع التطبيق تلقائيًا")
             } else {
                 clip("path", tgt.absolutePath, "ادخل المجلد المحمي في " + app.label + " وانسخ مساره ثم ارجع هنا")
@@ -707,7 +708,7 @@ class MainActivity : Activity() {
             if (Snap.on()) toast("👁 القراءة التلقائية شغالة") else askReader()
         }
         eyeBtn.setOnLongClickListener {
-            clip("dump", if (Snap.dump.isEmpty()) "لا يوجد تشخيص بعد — فعّل 👁 ثم افتح Files من زر 📂" else Snap.dump, "🐞 تم نسخ تشخيص شاشة Files")
+            clip("dump", if (Snap.dump.isEmpty() && Snap.log().isEmpty()) "لا يوجد تشخيص بعد — فعّل 👁 ثم افتح Files من زر 📂" else Snap.log() + "\n" + Snap.dump, "🐞 تم نسخ تشخيص شاشة Files")
             true
         }
         head.addView(eyeBtn, lp(WRAP, WRAP, 0f, 3))
@@ -1096,8 +1097,9 @@ class MainActivity : Activity() {
         val isProt = disk.saf.prot(cur)
         val snap = Snap.dirs[cur.path]
         if (isProt && snap != null && (kids == null || kids.isEmpty())) kids = snap.map { snapEntry(it) }
-        protectedDir = kids == null || (kids.isEmpty() && isProt)
-        needGrant = isProt && !Shz.ready() && disk.saf.find(cur) == null && (kids == null || kids.isEmpty())
+        val snapHit = isProt && snap != null
+        protectedDir = !snapHit && (kids == null || (kids.isEmpty() && isProt))
+        needGrant = !snapHit && isProt && !Shz.ready() && disk.saf.find(cur) == null && (kids == null || kids.isEmpty())
         all = ArrayList(kids ?: emptyList<Entry>())
         refreshCrumbs()
         val todo = all.filter { it.size < 0 }
