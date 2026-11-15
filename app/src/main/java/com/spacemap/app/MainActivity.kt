@@ -251,7 +251,7 @@ class MainActivity : Activity() {
     private fun askSaf() {
         AlertDialog.Builder(this)
             .setTitle("🔓 فتح عبر منتقي النظام")
-            .setMessage("سيفتح منتقي ملفات النظام عند هذا المجلد. اضغط «استخدام هذا المجلد» ثم «السماح». على أندرويد 13+ النظام يخفي هذه المجلدات — استخدم Shizuku بدلاً منه.")
+            .setMessage("ستظهر قائمة بالتطبيقات القادرة على اختيار المجلد (النظام أو أي تطبيق ملفات آخر). اختر واحدًا ثم «استخدام هذا المجلد» ثم «السماح». على أندرويد 13+ النظام يخفي هذه المجلدات — استخدم Shizuku بدلاً منه.")
             .setPositiveButton("متابعة") { _, _ -> launchTree() }
             .setNegativeButton("إلغاء", null)
             .show()
@@ -270,9 +270,33 @@ class MainActivity : Activity() {
                 Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
                     Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
             )
+            val apps = packageManager.queryIntentActivities(i, 0)
+            val names = ArrayList<String>()
+            for (r in apps) names.add(r.loadLabel(packageManager).toString() + "\n" + r.activityInfo.packageName)
+            names.add("🧭 اختيار النظام: كل التطبيقات المتاحة")
+            AlertDialog.Builder(this)
+                .setTitle("افتح المجلد باستخدام…")
+                .setItems(names.toTypedArray()) { _, w ->
+                    if (w < apps.size) {
+                        val i2 = Intent(i)
+                        i2.setClassName(apps[w].activityInfo.packageName, apps[w].activityInfo.name)
+                        startPick(i2)
+                    } else {
+                        startPick(Intent.createChooser(i, "اختر تطبيقًا لفتح المجلد"))
+                    }
+                }
+                .setNegativeButton("إلغاء", null)
+                .show()
+        } catch (e: Exception) {
+            toast("تعذر فتح المنتقي")
+        }
+    }
+    @Suppress("DEPRECATION")
+    private fun startPick(i: Intent) {
+        try {
             startActivityForResult(i, 77)
         } catch (e: Exception) {
-            toast("تعذر فتح منتقي النظام")
+            toast("تعذر فتح هذا التطبيق")
         }
     }
     @Suppress("DEPRECATION")
