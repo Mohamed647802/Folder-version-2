@@ -87,6 +87,9 @@ class MainActivity : Activity() {
     private var needGrant = false
     private var home = false
     private var showHidden = true
+    private var bridgeOn = false
+    private var bridgeOld = ""
+    private var incoming: Intent? = null
     private lateinit var pathEdit: EditText
     private lateinit var crumbs: LinearLayout
     private lateinit var crumbScroll: HorizontalScrollView
@@ -119,11 +122,17 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildUi())
+        incoming = intent
         try {
             Shizuku.addBinderReceivedListenerSticky(binderL)
             Shizuku.addRequestPermissionResultListener(permL)
         } catch (e: Throwable) {
         }
+    }
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        incoming = intent
     }
     override fun onResume() {
         super.onResume()
@@ -133,6 +142,9 @@ class MainActivity : Activity() {
                 go(Environment.getExternalStorageDirectory())
             }
             if (!Shz.ready() && Shz.granted()) connectShz()
+            val inc = incoming
+            incoming = null
+            if (inc != null) handleIncoming(inc)
         } else if (!asking) {
             askAccess()
         }
@@ -256,7 +268,7 @@ class MainActivity : Activity() {
     private fun askSaf() {
         AlertDialog.Builder(this)
             .setTitle("🔓 فتح المجلد المحمي")
-            .setMessage("ستظهر قائمة بكل التطبيقات المثبتة على جهازك، اختر أي تطبيق تريده. التطبيقات القادرة على اختيار المجلد عليها علامة 📂. على أندرويد 13+ النظام يخفي هذه المجلدات — استخدم Shizuku بدلاً منه.")
+            .setMessage("اختر أي تطبيق من قائمة كل التطبيقات.\n\n📂 تطبيق يدعم اختيار المجلد: تختار المجلد داخله ويرجع التطبيق ويفتحه تلقائيًا.\n\nأي تطبيق آخر: يُفتح عند المجلد، وانسخ مساره من داخله ثم ارجع هنا فيُفتح المسار تلقائيًا (أو اضغط 📥 لصق).\n\nعلى أندرويد 13+ النظام قد يمنع منح الإذن — استخدم Shizuku.")
             .setPositiveButton("متابعة") { _, _ -> launchTree() }
             .setNegativeButton("إلغاء", null)
             .show()
@@ -281,10 +293,27 @@ class MainActivity : Activity() {
         )
         return i
     }
+    private fun pickIntents(pkg: String?): List<Intent> {
+        val list = ArrayList<Intent>()
+        list.add(treeIntent())
+        val oi = Intent("org.openintents.action.PICK_DIRECTORY")
+        oi.putExtra("org.openintents.extra.TITLE", "اختر المجلد")
+        list.add(oi)
+        val pk = Intent(Intent.ACTION_PICK)
+        pk.type = "resource/folder"
+        list.add(pk)
+        if (pkg != null) for (x in list) x.setPackage(pkg)
+        return list
+    }
     private fun allApps(): List<AppItem> {
         val pk = HashSet<String>()
-        val picks = packageManager.queryIntentActivities(treeIntent(), 0)
-        for (r in picks) pk.add(r.activityInfo.packageName)
+        val extra = ArrayList<android.content.pm.ResolveInfo>()
+        for (t in pickIntents(null)) {
+            for (r in packageManager.queryIntentActivities(t, 0)) {
+                pk.add(r.activityInfo.packageName)
+                extra.add(r)
+            }
+        }
         val main = Intent(Intent.ACTION_MAIN)
         main.addCategory(Intent.CATEGORY_LAUNCHER)
         val seen = HashSet<String>()
@@ -294,7 +323,7 @@ class MainActivity : Activity() {
             if (p == packageName || !seen.add(p)) continue
             out.add(AppItem(r.loadLabel(packageManager).toString(), p, pk.contains(p)))
         }
-        for (r in picks) {
+        for (r in extra) {
             val p = r.activityInfo.packageName
             if (p == packageName || !seen.add(p)) continue
             out.add(AppItem(r.loadLabel(packageManager).toString(), p, true))
@@ -312,6 +341,7 @@ class MainActivity : Activity() {
             ad.addAll(shown.map { (if (it.picker) "📂 " else "") + it.label + "\n" + it.pkg })
             ad.notifyDataSetChanged()
         }
+        val hint = tv("📂 = يدعم اختيار المجلد وإرجاعه • غير ذلك: انسخ المسار من داخله وارجع", 11f, C.SUB)
         val search = EditText(this)
         search.setSingleLine(true)
         search.hint = "ابحث عن تطبيق…"
@@ -330,6 +360,7 @@ class MainActivity : Activity() {
         val box = LinearLayout(this)
         box.orientation = LinearLayout.VERTICAL
         box.setPadding(dp(12), dp(8), dp(12), 0)
+        box.addView(hint, lp(MATCH, WRAP))
         box.addView(search, lp(MATCH, WRAP))
         box.addView(lv, lp(MATCH, dp(360)))
         val dlg = AlertDialog.Builder(this)
@@ -355,13 +386,15 @@ class MainActivity : Activity() {
     }
     private fun openWith(app: AppItem) {
         try {
-            val t = treeIntent()
-            t.setPackage(app.pkg)
-            if (packageManager.queryIntentActivities(t, 0).isNotEmpty()) {
-                startPick(t)
-                return
+            for (t in pickIntents(app.pkg)) {
+                if (packageManager.queryIntentActivities(t, 0).isNotEmpty()) {
+                    startPick(t)
+                    return
+                }
             }
-            clip("path", cur.absolutePath, "المسار منسوخ: " + cur.absolutePath)
+            clip("path", cur.absolutePath, "ادخل المجلد المحمي في " + app.label + " وانسخ مساره ثم ارجع هنا")
+            bridgeOld = clipText()
+            bridgeOn = true
             val v = Intent(Intent.ACTION_VIEW)
             v.setDataAndType(DocumentsContract.buildDocumentUri(AUTH, docIdOf(cur)), "vnd.android.document/directory")
             v.setPackage(app.pkg)
@@ -374,11 +407,12 @@ class MainActivity : Activity() {
             val l = packageManager.getLaunchIntentForPackage(app.pkg)
             if (l != null) {
                 startActivity(l)
-                toast("فتحت " + app.label + " — الصق المسار هناك")
             } else {
+                bridgeOn = false
                 toast("تعذر فتح هذا التطبيق")
             }
         } catch (e: Exception) {
+            bridgeOn = false
             toast("تعذر فتح هذا التطبيق")
         }
     }
@@ -390,21 +424,76 @@ class MainActivity : Activity() {
             toast("تعذر فتح هذا التطبيق")
         }
     }
+    private fun uriToPath(u: Uri): String? {
+        try {
+            if (u.scheme == "file") return u.path
+            if (u.authority == AUTH) {
+                val id = try {
+                    DocumentsContract.getDocumentId(u)
+                } catch (e: Exception) {
+                    DocumentsContract.getTreeDocumentId(u)
+                }
+                return disk.saf.rootOf(id).path
+            }
+        } catch (e: Exception) {
+        }
+        return null
+    }
+    private fun handleIncoming(i: Intent) {
+        val t = i.getStringExtra(Intent.EXTRA_TEXT)
+        val d = i.data
+        if (i.action == Intent.ACTION_SEND && !t.isNullOrBlank()) {
+            goPath(t)
+        } else if (i.action == Intent.ACTION_VIEW && d != null) {
+            val p = uriToPath(d)
+            if (p != null) goPath(p) else toast("تعذر قراءة المسار من التطبيق")
+        }
+    }
+    private fun clipText(): String {
+        return try {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val c = cm.primaryClip
+            if (c != null && c.itemCount > 0) c.getItemAt(0).coerceToText(this)?.toString() ?: "" else ""
+        } catch (e: Exception) {
+            ""
+        }
+    }
+    private fun looksPath(t: String): Boolean {
+        val s = t.trim().lines().firstOrNull()?.trim() ?: return false
+        return s.startsWith("/") || s.contains("/Android/") || volumes().any { s.startsWith(it.first, true) }
+    }
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && bridgeOn) {
+            val t = clipText()
+            if (t.isNotBlank() && t != bridgeOld && looksPath(t)) {
+                bridgeOn = false
+                toast("فتح المسار المنسوخ…")
+                goPath(t)
+            }
+        }
+    }
     @Suppress("DEPRECATION")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != 77) return
         val u = data?.data
         if (resultCode == RESULT_OK && u != null) {
-            if (disk.saf.save(u)) {
-                toast("✅ تم منح الوصول")
-                disk.cache.clear()
-                load()
+            if (DocumentsContract.isTreeUri(u)) {
+                if (disk.saf.save(u)) {
+                    toast("✅ تم منح الوصول")
+                    disk.cache.clear()
+                    val r = uriToPath(u)
+                    if (r != null) go(File(r)) else load()
+                } else {
+                    toast("رفض النظام هذا المجلد")
+                }
             } else {
-                toast("رفض النظام هذا المجلد")
+                val r = uriToPath(u)
+                if (r != null) goPath(r) else toast("تعذر قراءة المجلد المختار")
             }
         } else {
-            toast("لم يتم منح الوصول — جرّب تطبيقًا آخر أو Shizuku")
+            toast("لم يتم اختيار مجلد — جرّب تطبيقًا آخر أو Shizuku")
         }
     }
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
@@ -642,6 +731,7 @@ class MainActivity : Activity() {
             }
         }
         var p = line.trim().trim('"', '\'').removePrefix("file://").trim()
+        p = p.replace(" › ", "/").replace(" > ", "/").replace("›", "/").replace("\u200f", "").replace("\u200e", "").trim()
         if (p.isEmpty()) {
             goHome()
             return
@@ -768,6 +858,7 @@ class MainActivity : Activity() {
         clip("content", sb.toString(), "تم نسخ محتوى المجلد (${shown.size} عنصر)")
     }
     private fun go(dir: File) {
+        bridgeOn = false
         cur = dir
         selected.clear()
         load()
