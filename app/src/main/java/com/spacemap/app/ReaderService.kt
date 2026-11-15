@@ -3,6 +3,7 @@ import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.graphics.Rect
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.os.Handler
 import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
@@ -28,6 +29,17 @@ object Snap {
     var last = ""
     @Volatile
     var dump = ""
+    val queue = ArrayDeque<String>()
+    @Volatile
+    var deep = false
+    @Volatile
+    var deepRoot = ""
+    @Volatile
+    var visited = 0
+    @Volatile
+    var saw = true
+    @Volatile
+    var navAt = 0L
     fun on(): Boolean = running != null
     fun arm(b: String, ret: Boolean) {
         base = b
@@ -35,7 +47,27 @@ object Snap {
         returnOnBase = ret
         armed = true
         armedAt = System.currentTimeMillis()
+        navAt = armedAt
+        saw = false
+        deep = false
         scanned.clear()
+    }
+    fun startDeep(root: String) {
+        deepRoot = root
+        queue.clear()
+        visited = 0
+        deep = true
+    }
+    fun total(p: String): Long {
+        val l = dirs[p] ?: return 0L
+        var s = 0L
+        for (r in l) s += if (r.dir) total(p + "/" + r.name) else r.size
+        return s
+    }
+    fun complete(p: String): Boolean {
+        val l = dirs[p] ?: return false
+        for (r in l) if (r.dir && !complete(p + "/" + r.name)) return false
+        return true
     }
 }
 class ReaderService : AccessibilityService() {
@@ -47,6 +79,7 @@ class ReaderService : AccessibilityService() {
     private var stagnant = 0
     private val rows = LinkedHashMap<String, Row>()
     private val kick = Runnable { startScan() }
+    private val giveUp = Runnable { onGiveUp() }
     private val protRx = Regex("/Android/(data|obb)(/.*)?$")
     private val sizeRx = Regex(
         "([0-9]+(?:[.,][0-9]+)?)\\s*(bytes|byte|KB|MB|GB|TB|B|بايت|ك\\.?\\s?ب\\.?|كيلوبايت|م\\.?\\s?ب\\.?|ميغابايت|ميجابايت|ج\\.?\\s?ب\\.?|جيجابايت|غيغابايت|ت\\.?\\s?ب\\.?|تيرابايت)(?![A-Za-z])",
@@ -73,19 +106,28 @@ class ReaderService : AccessibilityService() {
             Snap.armed = false
             return
         }
+        if (!Snap.saw && System.currentTimeMillis() - Snap.navAt > 250) Snap.saw = true
         h.removeCallbacks(kick)
         h.postDelayed(kick, 900)
     }
     private fun toast(s: String) = Toast.makeText(applicationContext, s, Toast.LENGTH_SHORT).show()
     private fun startScan() {
         if (!Snap.armed || scanning) return
+        if (!Snap.saw) {
+            if (System.currentTimeMillis() - Snap.armedAt > 600000L) {
+                Snap.armed = false
+                return
+            }
+            h.postDelayed(kick, 600)
+            return
+        }
         val root = rootInActiveWindow ?: return
         if (root.packageName?.toString()?.contains("documentsui") != true) return
         val p = readPath(root)
         Snap.dump = "pkg=" + root.packageName + "\npath=" + p + "\n" + dumpTree(root)
         if (p == null) {
             fails++
-            if (fails == 3) toast("تعذر معرفة المجلد من شاشة Files — ارجع لخريطة المساحة واضغط 👁 مطولًا لنسخ التشخيص")
+            if (fails == 3 && !Snap.deep) toast("تعذر معرفة المجلد من شاشة Files — ارجع لخريطة المساحة واضغط 👁 مطولًا لنسخ التشخيص")
             return
         }
         if (!protRx.containsMatchIn(p)) return
@@ -96,7 +138,7 @@ class ReaderService : AccessibilityService() {
         passes = 0
         stagnant = 0
         scanning = true
-        toast("👁 جارٍ قراءة المجلد…")
+        if (!Snap.deep) toast("👁 جارٍ قراءة المجلد…")
         rewind(0)
     }
     private fun readPath(root: AccessibilityNodeInfo): String? {
@@ -108,7 +150,7 @@ class ReaderService : AccessibilityService() {
             val parts = seg.drop(i).filter { it != ">" && it != "›" && it != "/" && it != "<" }
             return ext + "/" + parts.joinToString("/")
         }
-        val t = title(root) ?: return null
+        val t = seg.lastOrNull { it != ">" && it != "›" && it != "/" && it != "<" } ?: title(root) ?: return null
         val last = Snap.last
         if (last.isNotEmpty()) {
             val lf = File(last)
@@ -201,9 +243,23 @@ class ReaderService : AccessibilityService() {
         val moved = stagnant < 3 && passes < 250 && l.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
         if (moved) h.postDelayed({ step() }, 350) else finish(true)
     }
+    private fun back(p: String) {
+        try {
+            val i = Intent(this, MainActivity::class.java)
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            i.putExtra("snap", p)
+            startActivity(i)
+        } catch (e: Exception) {
+            toast("تعذر الرجوع للتطبيق — افتحه يدويًا")
+        }
+    }
     private fun finish(ok: Boolean) {
         scanning = false
         if (!ok) {
+            if (Snap.deep) {
+                next()
+                return
+            }
             toast("تعذر قراءة قائمة الملفات — اضغط 👁 مطولًا في خريطة المساحة لنسخ التشخيص")
             return
         }
@@ -211,16 +267,68 @@ class ReaderService : AccessibilityService() {
         Snap.dirs[path] = list
         Snap.scanned.add(path)
         Snap.last = path
+        if (Snap.deep) {
+            Snap.visited++
+            for (r in list) if (r.dir) Snap.queue.addLast(path + "/" + r.name)
+            next()
+            return
+        }
         Snap.armed = false
         toast("✅ تمت قراءة " + list.size + " عنصر")
-        try {
-            val i = Intent(this, MainActivity::class.java)
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-            i.putExtra("snap", path)
-            startActivity(i)
-        } catch (e: Exception) {
-            toast("تعذر الرجوع للتطبيق — افتحه يدويًا")
+        back(path)
+    }
+    private fun next() {
+        h.removeCallbacks(giveUp)
+        h.removeCallbacks(kick)
+        val p = Snap.queue.removeFirstOrNull()
+        if (p == null || Snap.visited >= 2500) {
+            endDeep()
+            return
         }
+        val now = System.currentTimeMillis()
+        Snap.base = p
+        Snap.last = p
+        Snap.returnOnBase = true
+        Snap.armed = true
+        Snap.armedAt = now
+        Snap.navAt = now
+        Snap.saw = false
+        if (Snap.visited % 5 == 0) toast("📏 مسح شامل… " + Snap.visited + " مجلد • المتبقي " + Snap.queue.size)
+        try {
+            val ext = Environment.getExternalStorageDirectory().path
+            val uri = DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:" + p.removePrefix(ext).trimStart('/'))
+            val pk = rootInActiveWindow?.packageName?.toString()
+            val b = Intent("android.provider.action.BROWSE")
+            b.setPackage(if (pk != null && pk.contains("documentsui")) pk else "com.android.documentsui")
+            b.setDataAndType(uri, "vnd.android.document/directory")
+            b.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(b)
+        } catch (e: Exception) {
+        }
+        h.postDelayed(giveUp, 12000)
+    }
+    private fun onGiveUp() {
+        if (!Snap.deep) return
+        val pk = rootInActiveWindow?.packageName?.toString()
+        if (pk != null && !pk.contains("documentsui")) {
+            Snap.deep = false
+            Snap.armed = false
+            toast("⛔ توقف المسح الشامل")
+            return
+        }
+        if (scanning) {
+            h.postDelayed(giveUp, 10000)
+            return
+        }
+        next()
+    }
+    private fun endDeep() {
+        h.removeCallbacks(giveUp)
+        val root = Snap.deepRoot
+        Snap.deep = false
+        Snap.armed = false
+        toast("✅ المسح الشامل: " + Snap.visited + " مجلد")
+        back(root)
     }
     private fun texts(n: AccessibilityNodeInfo, out: MutableList<Pair<String, String>>) {
         val t = n.text?.toString()
