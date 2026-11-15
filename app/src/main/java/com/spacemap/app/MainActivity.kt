@@ -441,11 +441,50 @@ class MainActivity : Activity() {
     }
     private fun snapEntry(r: Row): Entry {
         val f = File(cur, r.name)
-        val e = if (r.dir) Entry(f, Kind.FOLDER, 0L, r.count, false) else Entry(f, kindOf(f), r.size, 0, false)
+        val e: Entry
+        val body: String
+        if (r.dir) {
+            val known = Snap.dirs[f.path]
+            val sz = if (known != null) Snap.total(f.path) else 0L
+            val cnt = if (known != null) known.size else r.count
+            e = Entry(f, Kind.FOLDER, sz, cnt, false)
+            val c = if (cnt > 0) " • $cnt عنصر" else ""
+            body = if (known == null) "مجلد$c • الحجم غير معروف (📏)"
+            else Fmt.size(sz) + (if (Snap.complete(f.path)) "" else "+") + c
+        } else {
+            e = Entry(f, kindOf(f), r.size, 0, false)
+            body = Fmt.size(r.size) + " • " + e.kind.label
+        }
         val d = if (r.date.isEmpty()) "" else " • " + r.date
-        val body = if (r.dir) "مجلد" + (if (r.count > 0) " • ${r.count} عنصر" else "") else Fmt.size(r.size) + " • " + e.kind.label
         e.note = "👁 " + body + d
         return e
+    }
+    private fun deepScan() {
+        if (!Snap.on()) {
+            askReader()
+            return
+        }
+        if (home || !disk.saf.prot(cur)) {
+            toast("المسح الشامل للمجلدات المحمية فقط (Android/data و Android/obb)")
+            return
+        }
+        val s = savedApp()
+        if (s == null) {
+            askSaf()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("📏 مسح شامل")
+            .setMessage(
+                "سيفتح Files ويدخل كل مجلد فرعي داخل «" + cur.name + "» تلقائيًا لقراءة الأحجام والمحتوى حتى آخر مجلد، ثم يرجعك هنا.\n\n" +
+                    "قد يستغرق عدة دقائق حسب عدد المجلدات (الأفضل تشغيله داخل مجلد تطبيق واحد). لا تلمس الشاشة، والخروج من Files يوقف المسح."
+            )
+            .setPositiveButton("ابدأ") { _, _ ->
+                openWith(s)
+                Snap.startDeep(cur.path)
+            }
+            .setNegativeButton("إلغاء", null)
+            .show()
     }
     private fun launchTree() {
         try {
@@ -726,8 +765,9 @@ class MainActivity : Activity() {
             true
         }
         val row2 = LinearLayout(this)
-        row2.addView(chip("📤 نسخ للشات (مسار + محتوى)") { copyForChat() }, lp(0, WRAP, 1f, 2))
+        row2.addView(chip("📤 نسخ للشات") { copyForChat() }, lp(0, WRAP, 1f, 2))
         row2.addView(openBtn, lp(0, WRAP, 1f, 2))
+        row2.addView(chip("📏 مسح شامل") { deepScan() }, lp(0, WRAP, 1f, 2))
         root.addView(row2, lp(MATCH, WRAP, 0f, 0, 0, 8))
         stats = LinearLayout(this)
         root.addView(stats, lp(MATCH, WRAP, 0f, 0, 0, 8))
