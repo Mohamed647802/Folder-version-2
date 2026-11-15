@@ -30,6 +30,16 @@ object Snap {
     @Volatile
     var dump = ""
     val queue = ArrayDeque<String>()
+    private val logs = ArrayList<String>()
+    @Volatile
+    var cap = 2500
+    fun note(s: String) {
+        synchronized(logs) {
+            logs.add(s)
+            if (logs.size > 14) logs.removeAt(0)
+        }
+    }
+    fun log(): String = synchronized(logs) { logs.joinToString("\n") }
     @Volatile
     var deep = false
     @Volatile
@@ -52,7 +62,8 @@ object Snap {
         deep = false
         scanned.clear()
     }
-    fun startDeep(root: String) {
+    fun startDeep(root: String, c: Int) {
+        cap = c
         deepRoot = root
         queue.clear()
         visited = 0
@@ -77,6 +88,7 @@ class ReaderService : AccessibilityService() {
     private var path = ""
     private var passes = 0
     private var stagnant = 0
+    private var emptyTries = 0
     private val rows = LinkedHashMap<String, Row>()
     private val kick = Runnable { startScan() }
     private val giveUp = Runnable { onGiveUp() }
@@ -130,10 +142,12 @@ class ReaderService : AccessibilityService() {
             if (fails == 3 && !Snap.deep) toast("تعذر معرفة المجلد من شاشة Files — ارجع لخريطة المساحة واضغط 👁 مطولًا لنسخ التشخيص")
             return
         }
+        Snap.note("scan? path=" + p + " base=" + Snap.base + " ret=" + Snap.returnOnBase + " deep=" + Snap.deep)
         if (!protRx.containsMatchIn(p)) return
         if (Snap.scanned.contains(p)) return
         if (p == Snap.base && !Snap.returnOnBase) return
         path = p
+        emptyTries = 0
         rows.clear()
         passes = 0
         stagnant = 0
@@ -142,6 +156,17 @@ class ReaderService : AccessibilityService() {
         rewind(0)
     }
     private fun readPath(root: AccessibilityNodeInfo): String? {
+        val p = readPath0(root)
+        if (p != null) return p
+        if (Snap.returnOnBase && Snap.base.isNotEmpty()) {
+            val seg = ArrayList<String>()
+            crumbs(root, seg, false)
+            val ls = seg.lastOrNull { it != ">" && it != "›" && it != "/" && it != "<" }
+            if (ls == null || ls == File(Snap.base).name) return Snap.base
+        }
+        return null
+    }
+    private fun readPath0(root: AccessibilityNodeInfo): String? {
         val ext = Environment.getExternalStorageDirectory().path
         val seg = ArrayList<String>()
         crumbs(root, seg, false)
@@ -196,7 +221,7 @@ class ReaderService : AccessibilityService() {
         val id = (n.viewIdResourceName ?: "").lowercase()
         val cn = n.className?.toString() ?: ""
         val bad = id.contains("breadcrumb") || id.contains("chip") || id.contains("roots") || id.contains("drawer") || id.contains("tab")
-        if (n.isScrollable && !bad && (cn.contains("RecyclerView") || cn.contains("ListView") || cn.contains("GridView"))) out.add(n)
+        if (n.isVisibleToUser && !bad && (cn.contains("RecyclerView") || cn.contains("ListView") || cn.contains("GridView"))) out.add(n)
         for (i in 0 until n.childCount) {
             val c = n.getChild(i) ?: continue
             lists(c, out)
@@ -223,13 +248,25 @@ class ReaderService : AccessibilityService() {
     }
     private fun step() {
         val rt = rootInActiveWindow
-        if (rt == null || readPath(rt) != path) {
+        if (rt == null || rt.packageName?.toString()?.contains("documentsui") != true) {
+            Snap.note("abort: window is not documentsui")
+            scanning = false
+            return
+        }
+        val rp = readPath(rt)
+        if (rp != null && rp != path) {
+            Snap.note("abort: screen changed " + rp + " != " + path)
             scanning = false
             return
         }
         val l = listNode()
         if (l == null) {
-            finish(false)
+            if (passes == 0 && emptyTries < 3) {
+                emptyTries++
+                h.postDelayed({ step() }, 700)
+                return
+            }
+            finish(true)
             return
         }
         val before = rows.size
@@ -264,6 +301,7 @@ class ReaderService : AccessibilityService() {
             return
         }
         val list = ArrayList<Row>(rows.values)
+        Snap.note("done " + path + " rows=" + list.size)
         Snap.dirs[path] = list
         Snap.scanned.add(path)
         Snap.last = path
@@ -281,7 +319,7 @@ class ReaderService : AccessibilityService() {
         h.removeCallbacks(giveUp)
         h.removeCallbacks(kick)
         val p = Snap.queue.removeFirstOrNull()
-        if (p == null || Snap.visited >= 2500) {
+        if (p == null || Snap.visited >= Snap.cap) {
             endDeep()
             return
         }
